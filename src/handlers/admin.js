@@ -542,12 +542,20 @@ const PUBLIC_ADMIN_ACTION_HANDLERS = {
   clear_theme_preview_auth: handleClearThemePreviewAuthAction
 };
 
+export function sanitizeAdminSettings(fullSettings = {}) {
+  const { jwt_secret, github_client_secret, password, ...safeSettings } = fullSettings || {};
+  return {
+    ...safeSettings,
+    password_configured: Boolean(String(password || '').trim()),
+    github_client_secret_configured: Boolean(String(github_client_secret || '').trim())
+  };
+}
+
 async function handleGetSettingsAction({ env, sys, loadFullSettings }) {
   const fullSettings = loadFullSettings ? await loadFullSettings() : sys;
-  const { jwt_secret, ...safeSettings } = fullSettings || {};
   return createSuccessResponse({
     success: true,
-    settings: safeSettings,
+    settings: sanitizeAdminSettings(fullSettings),
     api_secret: env.API_SECRET
   });
 }
@@ -756,6 +764,9 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
 
     if (data.action === 'save_settings') {
       const settings = data.settings || {};
+      if (!String(sys?.password || '').trim() && !String(settings.password || '')) {
+        return createBadRequestResponse('passwordRequired');
+      }
       const normalizedThemeUrl = normalizeThemeUrl(settings.theme_url);
       if (normalizedThemeUrl === null) {
         return createBadRequestResponse('invalidThemeUrl');
@@ -774,6 +785,26 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         }
       }
 
+      const githubOAuthEnabled = normalizeBooleanSetting(
+        settings.github_oauth_enabled !== undefined
+          ? settings.github_oauth_enabled
+          : sys?.github_oauth_enabled
+      ) === 'true';
+      const effectiveGithubClientId = String(
+        settings.github_client_id !== undefined ? settings.github_client_id : sys?.github_client_id || ''
+      ).trim();
+      const effectiveGithubClientSecret = String(
+        settings.github_client_secret !== undefined ? settings.github_client_secret : sys?.github_client_secret || ''
+      ).trim();
+      if (githubOAuthEnabled) {
+        if (!effectiveGithubClientId) {
+          return createBadRequestResponse('githubClientIdRequired');
+        }
+        if (!effectiveGithubClientSecret) {
+          return createBadRequestResponse('githubClientSecretRequired');
+        }
+      }
+
       // 如果 tg_notify 或 expire_reminder 开启，验证 tg_bot_token 不为空
       const hasResourceAlertRulesInput = settings.resource_alert_rules !== undefined;
       const tgNotify = settings.tg_notify !== undefined
@@ -787,12 +818,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         ? normalizeResourceAlertRules(settings.resource_alert_rules)
         : currentResourceAlertRules;
       const resourceAlertEnabled = normalizedResourceAlertRules.length > 0;
-      const trafficReportEnabled = normalizeBooleanSetting(
-        settings.traffic_report_enabled !== undefined
-          ? settings.traffic_report_enabled
-          : sys?.traffic_report_enabled
-      ) === 'true';
-      if (tgNotify !== '0' || expireReminder !== '0' || resourceAlertEnabled || trafficReportEnabled) {
+      if (tgNotify !== '0' || expireReminder !== '0' || resourceAlertEnabled) {
         const webhookEnabled = settings.notification_webhook_enabled !== undefined
           ? normalizeBooleanSetting(settings.notification_webhook_enabled) === 'true'
           : normalizeBooleanSetting(sys?.notification_webhook_enabled) === 'true';
@@ -886,8 +912,6 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             siteOptions[field] = normalizeNotificationTimezone(settings[field]);
           } else if (field === 'expire_notification_time') {
             siteOptions[field] = normalizeExpireNotificationTime(settings[field]);
-          } else if (field === 'traffic_report_enabled') {
-            siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'notification_webhook_enabled') {
             siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'notification_webhook_method') {
@@ -900,6 +924,14 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             siteOptions[field] = normalizeNotificationWebhookBody(settings[field]);
           } else if (field === 'notification_template') {
             siteOptions[field] = normalizeNotificationTemplate(settings[field]);
+          } else if (field === 'github_oauth_enabled') {
+            siteOptions[field] = normalizeBooleanSetting(settings[field]);
+          } else if (field === 'github_client_id' || field === 'github_client_secret') {
+            siteOptions[field] = String(settings[field] || '').trim();
+          } else if (field === 'github_user_id') {
+            siteOptions[field] = /^[1-9]\d*$/.test(String(settings[field] || '').trim())
+              ? String(settings[field]).trim()
+              : '';
           } else if (field === 'theme_url') {
             siteOptions[field] = normalizedThemeUrl;
           } else {
